@@ -1,0 +1,16 @@
+{
+  "name": "rewindo",
+  "version": "0.1.0",
+  "description": "Prompt-to-code timeline with one-command revert for Claude Code",
+  "author": "Rewindo Contributors",
+  "license": "MIT",
+  "repository": "https://github.com/user/rewindo",
+  "hooks": "./hooks/hooks.json",
+  "bin": {
+    "rewindo": "./bin/rewindo"
+  },
+  "capabilities": {
+    "hooks": ["UserPromptSubmit", "Stop"]
+  },
+  "python": ">=3.9"
+}

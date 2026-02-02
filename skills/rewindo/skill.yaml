@@ -1,0 +1,76 @@
+# Rewindo Skill for Claude Code
+# Allows using Rewindo commands directly from Claude Code
+
+name: rewindo
+description: Timeline and revert tool for Claude Code. Track prompts and revert to checkpoints.
+
+commands:
+  - name: list
+    description: List all timeline entries (prompts and changes)
+    examples:
+      - "rewindo list"
+      - "show my timeline"
+      - "what checkpoints do i have"
+
+  - name: show
+    description: Show details of a specific checkpoint
+    parameters:
+      - name: id
+        description: Checkpoint number (e.g., 1, 2, 3)
+        required: true
+    examples:
+      - "rewindo show 5"
+      - "show checkpoint 3"
+      - "what's in checkpoint #2"
+
+  - name: revert
+    description: Revert to a previous checkpoint
+    parameters:
+      - name: id
+        description: Checkpoint number to revert to
+        required: true
+    examples:
+      - "rewindo revert 5"
+      - "go back to checkpoint 3"
+      - "restore to #2"
+
+  - name: undo
+    description: Undo the last checkpoint
+    examples:
+      - "rewindo undo"
+      - "undo last change"
+
+  - name: search
+    description: Search prompts by text
+    parameters:
+      - name: query
+        description: Text to search for
+        required: true
+    examples:
+      - "rewindo search authentication"
+      - "search for api"
+
+  - name: label
+    description: Add a label to a checkpoint
+    parameters:
+      - name: id
+        description: Checkpoint number
+        required: true
+      - name: label
+        description: Label text (e.g., working, before-refactor)
+        required: true
+    examples:
+      - "rewindo label 5 working"
+      - "mark checkpoint 2 as working"
+
+  - name: doctor
+    description: Check Rewindo health and timeline integrity
+    examples:
+      - "rewindo doctor"
+      - "check rewindo health"
+
+  - name: init
+    description: Set up Rewindo hooks for current project
+    examples:
+      - "rewindo init"
+      - "enable rewindo"

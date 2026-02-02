@@ -1,0 +1,817 @@
+#!/usr/bin/env python3
+"""
+Rewindo CLI - Timeline inspection and revert tool for Claude Code.
+
+Usage:
+    rewindo init                    # Set up Claude Code hooks
+    rewindo status                  # Check hook configuration
+    rewindo list [--limit N] [--query PATTERN]
+    rewindo show <id>
+    rewindo get-prompt <id> [--max-chars N] [--offset N]
+    rewindo get-diff <id> [--max-lines N] [--offset-lines N] [--file PATH]
+    rewindo revert <id> [--replay user] [--to END]  # Restore with optional replay
+    rewindo undo [--yes]
+    rewindo label <id> <label>
+    rewindo search <query>
+    rewindo doctor
+    rewindo export <id> [--output DIR]
+"""
+
+import json
+import os
+import sys
+import argparse
+from pathlib import Path
+
+# Add lib directory to path for imports
+LIB_DIR = Path(__file__).parent.parent / "lib"
+sys.path.insert(0, str(LIB_DIR))
+
+try:
+    from rewindo import Rewindo
+except ImportError:
+    # For development, fallback to relative import
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from rewindo import Rewindo
+
+# Import new modules for manual edits tracking
+try:
+    from state import StateManager
+    from detector import WorkingTreeDetector
+    from snapshot import SnapshotCreator
+except ImportError:
+    # For development, fallback to relative import
+    sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
+    from state import StateManager
+    from detector import WorkingTreeDetector
+    from snapshot import SnapshotCreator
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Rewindo - Prompt-to-code timeline for Claude Code",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+
+    # Global options
+    parser.add_argument(
+        "--cwd",
+        help="Working directory (default: current directory)",
+        default=None
+    )
+    parser.add_argument(
+        "--data-dir",
+        help="Data directory relative to project root (default: .claude/data)",
+        default=".claude/data"
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # init command
+    init_parser = subparsers.add_parser("init", help="Set up Claude Code hooks")
+    init_parser.add_argument("--global", "-g", dest="global_mode", action="store_true", help="Use global timeline storage")
+    init_parser.add_argument("--local", "-l", action="store_true", help="Use local project storage")
+    init_parser.add_argument("--interactive", "-i", action="store_true", help="Interactive setup")
+    init_parser.add_argument("--dry-run", action="store_true", help="Show what would be done without making changes")
+
+    # status command
+    subparsers.add_parser("status", help="Check hook configuration status")
+
+    # list command
+    list_parser = subparsers.add_parser("list", help="List timeline entries")
+    list_parser.add_argument("--limit", type=int, default=20, help="Max entries to show")
+    list_parser.add_argument("--query", help="Filter by query pattern")
+    list_parser.add_argument("--expand", "-e", action="store_true", help="Show longer prompt snippets (200 chars)")
+    list_parser.add_argument("--expand-chars", type=int, default=200, help="Characters to show when expanded (default: 200)")
+
+    # show command
+    show_parser = subparsers.add_parser("show", help="Show entry details")
+    show_parser.add_argument("id", type=int, help="Entry ID")
+
+    # get-prompt command
+    prompt_parser = subparsers.add_parser("get-prompt", help="Get full prompt text")
+    prompt_parser.add_argument("id", type=int, help="Entry ID")
+    prompt_parser.add_argument("--max-chars", type=int, default=2000, help="Max characters to return")
+    prompt_parser.add_argument("--offset", type=int, default=0, help="Character offset")
+
+    # get-diff command
+    diff_parser = subparsers.add_parser("get-diff", help="Get diff for entry")
+    diff_parser.add_argument("id", type=int, help="Entry ID")
+    diff_parser.add_argument("--max-lines", type=int, default=200, help="Max lines to return")
+    diff_parser.add_argument("--offset-lines", type=int, default=0, help="Line offset")
+    diff_parser.add_argument("--file", help="Specific file to show diff for")
+
+    # revert command
+    revert_parser = subparsers.add_parser("revert", help="Revert to checkpoint")
+    revert_parser.add_argument("id", type=int, help="Entry ID to revert to")
+    revert_parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    revert_parser.add_argument("--replay", choices=["user", "none"], default="none",
+                           help="Replay user edits after target (default: none)")
+    revert_parser.add_argument("--to", type=int, help="Replay only up to this step ID")
+
+    # undo command
+    undo_parser = subparsers.add_parser("undo", help="Undo last checkpoint")
+    undo_parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+
+    # label command
+    label_parser = subparsers.add_parser("label", help="Add label to entry")
+    label_parser.add_argument("id", type=int, help="Entry ID")
+    label_parser.add_argument("label", help="Label to add (e.g., 'working', 'before-refactor')")
+
+    # search command
+    search_parser = subparsers.add_parser("search", help="Search prompts")
+    search_parser.add_argument("query", help="Search query")
+
+    # doctor command
+    subparsers.add_parser("doctor", help="Check installation and timeline health")
+
+    # export command
+    export_parser = subparsers.add_parser("export", help="Export entry as bundle")
+    export_parser.add_argument("id", type=int, help="Entry ID")
+    export_parser.add_argument("--output", "-o", help="Output directory")
+
+    # capture-prompt command (for hook)
+    capture_prompt_parser = subparsers.add_parser("capture-prompt", help="Capture prompt state (called by prompt-submit hook)")
+    capture_prompt_parser.add_argument("--session", help="Session ID")
+    capture_prompt_parser.add_argument("--prompt", help="Prompt text")
+    capture_prompt_parser.add_argument("--prompt-file", help="Path to file containing prompt text")
+
+    # capture-stop command (for hook)
+    subparsers.add_parser("capture-stop", help="Capture assistant step (called by stop hook)")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 0
+
+    # Execute command
+    # init and status don't need Rewindo instance (no git repo required)
+    if args.command == "init":
+        return cmd_init(args)
+    elif args.command == "status":
+        return cmd_status(args)
+
+    # All other commands need Rewindo instance
+    # Initialize Rewindo
+    try:
+        rewindo = Rewindo(
+            cwd=args.cwd,
+            data_dir=args.data_dir
+        )
+    except Exception as e:
+        print(f"Error initializing Rewindo: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        if args.command == "list":
+            return cmd_list(rewindo, args)
+        elif args.command == "capture-prompt":
+            return cmd_capture_prompt(rewindo, args)
+        elif args.command == "capture-stop":
+            return cmd_capture_stop(rewindo, args)
+        elif args.command == "show":
+            return cmd_show(rewindo, args)
+        elif args.command == "get-prompt":
+            return cmd_get_prompt(rewindo, args)
+        elif args.command == "get-diff":
+            return cmd_get_diff(rewindo, args)
+        elif args.command == "revert":
+            return cmd_revert(rewindo, args)
+        elif args.command == "undo":
+            return cmd_undo(rewindo, args)
+        elif args.command == "label":
+            return cmd_label(rewindo, args)
+        elif args.command == "search":
+            return cmd_search(rewindo, args)
+        elif args.command == "doctor":
+            return cmd_doctor(rewindo, args)
+        elif args.command == "export":
+            return cmd_export(rewindo, args)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_list(rewindo, args):
+    """List timeline entries."""
+    entries = rewindo.list_entries(limit=args.limit, query=args.query)
+    rewindo.print_entries(entries, expand=args.expand, expand_chars=args.expand_chars)
+    return 0
+
+
+def cmd_show(rewindo, args):
+    """Show entry details."""
+    entry = rewindo.get_entry(args.id)
+    if not entry:
+        print(f"Entry #{args.id} not found", file=sys.stderr)
+        return 1
+    rewindo.print_entry_detail(entry)
+    return 0
+
+
+def cmd_get_prompt(rewindo, args):
+    """Get prompt text with bounds."""
+    prompt = rewindo.get_prompt(args.id, max_chars=args.max_chars, offset=args.offset)
+    if prompt is None:
+        print(f"Entry #{args.id} not found", file=sys.stderr)
+        return 1
+    print(prompt)
+    return 0
+
+
+def cmd_get_diff(rewindo, args):
+    """Get diff with bounds."""
+    diff = rewindo.get_diff(
+        args.id,
+        max_lines=args.max_lines,
+        offset_lines=args.offset_lines,
+        file_path=args.file
+    )
+    if diff is None:
+        print(f"Entry #{args.id} not found", file=sys.stderr)
+        return 1
+    print(diff)
+    return 0
+
+
+def cmd_revert(rewindo, args):
+    """Revert to checkpoint with optional replay of user edits."""
+    entry = rewindo.get_entry(args.id)
+    if not entry:
+        print(f"Entry #{args.id} not found", file=sys.stderr)
+        return 1
+
+    if not args.yes:
+        # Show what will happen
+        prompt_snippet = entry.get("prompt", entry.get("message", ""))[:60]
+        print(f"Will restore to step #{args.id}: \"{prompt_snippet}...\"")
+
+        # Check for user steps after target
+        if args.replay == "user":
+            all_entries = rewindo.list_entries(limit=1000)  # Get all entries
+            user_steps_after = [
+                e for e in all_entries
+                if e["id"] > args.id and e.get("actor") == "user"
+            ]
+
+            # Apply --to filter if specified
+            if args.to:
+                user_steps_after = [e for e in user_steps_after if e["id"] <= args.to]
+
+            if user_steps_after:
+                print(f"\nUser edits that will be replayed:")
+                for step in user_steps_after:
+                    msg = step.get("prompt_snippet", step.get("message", ""))[:50]
+                    files_summary = " ".join([
+                        f"{f.get('path', 'unknown')}" for f in step.get("files", [])[:2]
+                    ])
+                    print(f"  #{step['id']} U -> {msg[:40]}... ({files_summary})")
+                print()
+
+        confirm = input("This will reset your working tree. Continue? [y/N] ")
+        if confirm.lower() != "y":
+            print("Aborted")
+            return 1
+
+    # Restore to target step
+    rewindo.revert_to(args.id)
+    print(f"Restored to step #{args.id}")
+
+    # Replay user edits if requested
+    if args.replay == "user":
+        all_entries = rewindo.list_entries(limit=1000)
+        user_step_ids = [
+            e["id"] for e in all_entries
+            if e["id"] > args.id and e.get("actor") == "user"
+        ]
+
+        # Apply --to filter if specified
+        if args.to:
+            user_step_ids = [eid for eid in user_step_ids if eid <= args.to]
+
+        if user_step_ids:
+            # Get full entries for replay (need checkpoint_sha)
+            user_steps_after = [rewindo.get_entry(eid) for eid in user_step_ids]
+
+            print(f"\nReplaying {len(user_steps_after)} user edit(s)...")
+            success = replay_user_steps(rewindo, user_steps_after)
+            if success:
+                print(f"Done! Replayed {len(user_steps_after)} user edit(s).")
+            else:
+                print("\nConflict detected! Please resolve the conflict:")
+                print("  1. Check status: git status")
+                print("  2. Resolve conflicts in affected files")
+                print("  3. Stage resolved files: git add <files>")
+                print("  4. Continue: git cherry-pick --continue")
+                print("  5. Or abort: git cherry-pick --abort")
+                return 1
+        else:
+            print("No user edits to replay.")
+
+    return 0
+
+
+def replay_user_steps(rewindo, user_steps):
+    """
+    Replay user steps using git cherry-pick.
+
+    Args:
+        rewindo: Rewindo instance
+        user_steps: List of user step entries to replay
+
+    Returns:
+        True if all steps replayed successfully, False if conflict occurred
+    """
+    import os
+    from detector import WorkingTreeDetector
+
+    detector = WorkingTreeDetector(rewindo.root)
+
+    for step in user_steps:
+        step_id = step["id"]
+        checkpoint_sha = step.get("checkpoint_sha")
+
+        if not checkpoint_sha:
+            print(f"Warning: Step #{step_id} has no checkpoint SHA, skipping", file=sys.stderr)
+            continue
+
+        # Cherry-pick the user step commit
+        result = rewindo._run_git("cherry-pick", checkpoint_sha, "--no-commit")
+
+        if result.returncode != 0:
+            # Conflict detected
+            print(f"\nConflict while replaying step #{step_id}", file=sys.stderr)
+            return False
+
+    return True
+
+
+def cmd_undo(rewindo, args):
+    """Undo last checkpoint."""
+    entries = rewindo.list_entries(limit=1)
+    if not entries:
+        print("No checkpoints to undo", file=sys.stderr)
+        return 1
+
+    last_id = entries[0]["id"]
+    if not args.yes:
+        entry = entries[0]
+        prompt_snippet = entry.get("prompt", "")[:60]
+        print(f"Undoing checkpoint #{last_id}: \"{prompt_snippet}...\"")
+        confirm = input("This will reset your working tree. Continue? [y/N] ")
+        if confirm.lower() != "y":
+            print("Aborted")
+            return 1
+
+    rewindo.undo()
+    print(f"Undid checkpoint #{last_id}")
+    return 0
+
+
+def cmd_label(rewindo, args):
+    """Add label to entry."""
+    if not rewindo.add_label(args.id, args.label):
+        print(f"Entry #{args.id} not found", file=sys.stderr)
+        return 1
+    print(f"Added label '{args.label}' to entry #{args.id}")
+    return 0
+
+
+def cmd_search(rewindo, args):
+    """Search prompts."""
+    results = rewindo.search(args.query)
+    if not results:
+        print(f"No results for '{args.query}'")
+        return 0
+    rewindo.print_entries(results)
+    return 0
+
+
+def cmd_doctor(rewindo, args):
+    """Check installation health."""
+    issues = rewindo.doctor()
+    if issues:
+        print("Issues found:")
+        for issue in issues:
+            print(f"  - {issue}")
+        return 1
+    else:
+        print("All checks passed!")
+        return 0
+
+
+def cmd_export(rewindo, args):
+    """Export entry as bundle."""
+    entry = rewindo.get_entry(args.id)
+    if not entry:
+        print(f"Entry #{args.id} not found", file=sys.stderr)
+        return 1
+
+    output_dir = rewindo.export_entry(args.id, args.output)
+    print(f"Exported entry #{args.id} to {output_dir}")
+    return 0
+
+
+def get_claude_settings_path():
+    """Get the path to Claude Code settings.json."""
+    # Check common locations
+    home = Path.home()
+
+    # Possible locations for Claude Code settings
+    possible_paths = [
+        home / ".claude" / "settings.json",
+        home / ".config" / "claude" / "settings.json",
+        Path(os.environ.get("APPDATA", "")) / "claude" / "settings.json" if os.name == "nt" else None,
+    ]
+
+    for path in possible_paths:
+        if path and path.exists():
+            return path
+
+    # Default to ~/.claude/settings.json
+    return home / ".claude" / "settings.json"
+
+
+def cmd_init(args):
+    """Initialize Rewindo by setting up Claude Code hooks."""
+    settings_path = get_claude_settings_path()
+
+    print("Rewindo Setup")
+    print("=" * 60)
+
+    # Check if settings file exists
+    if not settings_path.exists():
+        print(f"[!]  Claude Code settings not found at: {settings_path}")
+        print(f"   Creating new settings file...")
+
+        # Create parent directory if needed
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_data = {}
+    else:
+        try:
+            with open(settings_path, "r") as f:
+                settings_data = json.load(f)
+        except json.JSONDecodeError:
+            print(f"[!]  Settings file is invalid JSON. Creating new one...")
+            settings_data = {}
+
+    print(f"Found settings at: {settings_path}")
+
+    # Check if hooks are already configured
+    existing_hooks = settings_data.get("hooks", {})
+    if existing_hooks.get("prompt-submit") == "rewindo capture-prompt":
+        print("[OK] Hooks already configured!")
+        if not args.interactive and not args.dry_run:
+            return 0
+
+    # Show what will be done
+    print("\nI will add these hooks to your settings:")
+    print("  - prompt-submit -> rewindo capture-prompt")
+    print("  - stop -> rewindo capture-stop")
+
+    if args.dry_run:
+        print("\n[DRY RUN] No changes made.")
+        return 0
+
+    # Ask for confirmation
+    if not args.interactive:
+        print("\nThis will enable automatic checkpoint tracking for all your projects.")
+        confirm = input("Proceed? [Y/n]: ")
+        if confirm.lower() == "n":
+            print("Aborted.")
+            return 1
+
+    # Update settings
+    if "hooks" not in settings_data:
+        settings_data["hooks"] = {}
+
+    settings_data["hooks"]["prompt-submit"] = "rewindo capture-prompt"
+    settings_data["hooks"]["stop"] = "rewindo capture-stop"
+
+    # Write settings file
+    try:
+        with open(settings_path, "w") as f:
+            json.dump(settings_data, f, indent=2)
+    except Exception as e:
+        print(f"[ERROR] Failed to write settings: {e}", file=sys.stderr)
+        return 1
+
+    print("\n[OK] Hooks configured successfully!")
+
+    # Show storage location
+    if args.global_mode:
+        storage = Path.home() / ".rewindo"
+        print(f"[OK] Timeline will be stored in: {storage} (global)")
+    elif args.local:
+        print(f"[OK] Timeline will be stored in: .rewindo/ (per project)")
+    else:
+        print(f"[OK] Timeline will be stored in: .claude/data/ (per project)")
+
+    print("\n" + "=" * 60)
+    print("You're ready! Every prompt will now be tracked automatically.")
+    print("\nCommands:")
+    print("  rewindo list      - View your timeline")
+    print("  rewindo restore   - Restore to a previous step")
+    print("=" * 60)
+
+    return 0
+
+
+def cmd_status(args):
+    """Check Rewindo hook configuration status."""
+    settings_path = get_claude_settings_path()
+
+    print("Rewindo Status")
+    print("=" * 60)
+
+    if not settings_path.exists():
+        print(f"[ERROR] Claude Code settings not found")
+        print(f"   Expected location: {settings_path}")
+        print(f"\nRun 'rewindo init' to set up hooks.")
+        return 1
+
+    try:
+        with open(settings_path, "r") as f:
+            settings_data = json.load(f)
+    except json.JSONDecodeError:
+        print(f"[ERROR] Settings file is invalid JSON")
+        return 1
+
+    hooks = settings_data.get("hooks", {})
+
+    print(f"Settings location: {settings_path}")
+
+    prompt_hook = hooks.get("prompt-submit")
+    stop_hook = hooks.get("stop")
+
+    print("\nHook Configuration:")
+    if prompt_hook == "rewindo capture-prompt":
+        print(f"  [OK] prompt-submit: {prompt_hook}")
+    else:
+        status = prompt_hook if prompt_hook else "not set"
+        print(f"  [ ] prompt-submit: {status}")
+
+    if stop_hook == "rewindo capture-stop":
+        print(f"  [OK] stop: {stop_hook}")
+    else:
+        status = stop_hook if stop_hook else "not set"
+        print(f"  [ ] stop: {status}")
+
+    if prompt_hook == "rewindo capture-prompt" and stop_hook == "rewindo capture-stop":
+        print("\n✅ Rewindo is properly configured!")
+        return 0
+    else:
+        print("\n[!]  Hooks not configured. Run 'rewindo init' to set up.")
+        return 1
+
+
+def cmd_capture_prompt(rewindo, args):
+    """
+    Capture prompt state (called by prompt-submit hook).
+
+    Detects if user made manual edits since last step and creates a user step if so.
+    Then saves the prompt for the upcoming assistant step.
+    """
+    # Get prompt text
+    prompt = None
+    if args.prompt:
+        prompt = args.prompt
+    elif args.prompt_file:
+        try:
+            with open(args.prompt_file, "r") as f:
+                prompt = f.read()
+        except IOError as e:
+            print(f"Error reading prompt file: {e}", file=sys.stderr)
+            return 2
+
+    if not prompt:
+        print("No prompt provided", file=sys.stderr)
+        return 0  # Non-fatal
+
+    session = args.session or ""
+
+    try:
+        # Initialize state manager
+        state_manager = StateManager(rewindo.data_dir)
+
+        # Load last step info
+        last_step_sha = state_manager.get_last_step_sha()
+        last_step_id = state_manager.get_last_step_id()
+
+        # Detect if user made manual edits
+        if last_step_sha:
+            detector = WorkingTreeDetector(rewindo.root)
+            if detector.is_dirty_from(last_step_sha):
+                # User made manual edits - create a user step
+                snapshot_creator = SnapshotCreator(rewindo.root, rewindo.data_dir)
+
+                # Get changed files
+                changes = detector.get_changed_files()
+
+                # Filter out .claude/ directory (internal files that cause conflicts)
+                user_changes = [c for c in changes if not c.path.startswith(".claude/")]
+
+                # Only create snapshot if there are actual user changes
+                if user_changes:
+                    # Create snapshot
+                    snapshot = snapshot_creator.create_snapshot(
+                        parent_sha=last_step_sha,
+                        message=f"Manual edits before prompt #{last_step_id + 1 if last_step_id else 1}",
+                        actor="user",
+                        changed_files=user_changes
+                    )
+                else:
+                    snapshot = None
+
+                if snapshot:
+                    # Create journal entry for user step
+                    entry_id = rewindo.append_entry(
+                        actor="user",
+                        checkpoint_sha=snapshot.sha,
+                        files=snapshot.files,
+                        message=snapshot.message,
+                        parent_sha=last_step_sha
+                    )
+
+                    # Store ref
+                    snapshot_creator.store_ref(entry_id, snapshot.sha)
+
+                    # Update state
+                    state_manager.update_last_step(snapshot.sha, entry_id)
+
+                    print(f"[rewindo] User step #{entry_id} created: {len(snapshot.files)} file(s) changed", file=sys.stderr)
+
+        # Save prompt for the upcoming assistant step
+        next_step_id = state_manager.get_last_step_id()
+        if next_step_id is None:
+            next_step_id = 0
+        next_step_id += 1
+
+        prompt_file = rewindo.data_dir / "prompts" / f"{next_step_id:05d}.txt"
+        prompt_file.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(prompt_file, "w") as f:
+            f.write(prompt)
+
+        # Save prompt state for stop hook
+        prompt_state = {
+            "prompt": prompt,
+            "session": session,
+            "timestamp": __import__("datetime").datetime.now().isoformat(),
+            "prompt_file": f"prompts/{next_step_id:05d}.txt"
+        }
+
+        prompt_state_file = rewindo.data_dir / "prompt_state.json"
+        with open(prompt_state_file, "w") as f:
+            json.dump(prompt_state, f, indent=2)
+
+        return 0
+
+    except Exception as e:
+        print(f"Error in capture-prompt: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return 2  # Blocking error
+
+
+def cmd_capture_stop(rewindo, args):
+    """
+    Capture assistant step (called by stop hook).
+
+    Creates a snapshot of the current working tree after Claude's response.
+    """
+    try:
+        # Read prompt state
+        prompt_state_file = rewindo.data_dir / "prompt_state.json"
+        if not prompt_state_file.exists():
+            # No prompt was submitted, nothing to do
+            return 0
+
+        with open(prompt_state_file, "r") as f:
+            prompt_state = json.load(f)
+
+        prompt = prompt_state.get("prompt", "")
+        session = prompt_state.get("session", "")
+        prompt_file_ref = prompt_state.get("prompt_file")
+
+        # Initialize state manager
+        state_manager = StateManager(rewindo.data_dir)
+
+        # Load last step info
+        last_step_sha = state_manager.get_last_step_sha()
+
+        # Get current HEAD SHA
+        detector = WorkingTreeDetector(rewindo.root)
+        current_head = detector.get_current_head_sha()
+
+        if not current_head:
+            print("No git commits found", file=sys.stderr)
+            prompt_state_file.unlink(missing_ok=True)
+            return 0
+
+        # Create snapshot of current state
+        snapshot_creator = SnapshotCreator(rewindo.root, rewindo.data_dir)
+
+        # Get changes since last step
+        changes = detector.get_changed_files()
+
+        # Get the entry ID first
+        next_entry_id = rewindo.get_next_entry_id()
+
+        # If no uncommitted changes but HEAD has moved, use HEAD as the snapshot
+        if not changes and current_head != last_step_sha:
+            # The current HEAD IS the snapshot (Claude committed the changes)
+            # But we still need to compute what files changed
+            if last_step_sha:
+                # Get files changed between last_step_sha and HEAD
+                changes_result = rewindo._run_git(
+                    "diff", "--numstat", f"{last_step_sha}...{current_head}"
+                )
+            else:
+                # First checkpoint - get files changed in this commit (HEAD vs HEAD^)
+                changes_result = rewindo._run_git(
+                    "diff", "--numstat", f"{current_head}^..{current_head}"
+                )
+
+            if changes_result.returncode == 0:
+                # Parse the numstat output to get file changes
+                changed_files = []
+                for line in changes_result.stdout.strip().split('\n'):
+                    if line:
+                        parts = line.split('\t')
+                        if len(parts) >= 3:
+                            additions = int(parts[0]) if parts[0] != '-' else 0
+                            deletions = int(parts[1]) if parts[1] != '-' else 0
+                            file_path = parts[2]
+                            changed_files.append({
+                                'path': file_path,
+                                'additions': additions,
+                                'deletions': deletions
+                            })
+            else:
+                changed_files = []
+
+            snapshot = type('obj', (object,), {
+                'sha': current_head,
+                'files': changed_files,
+                'message': f"rewindo-{next_entry_id}"
+            })()
+        elif not changes:
+            # No changes at all
+            prompt_state_file.unlink(missing_ok=True)
+            return 0
+        else:
+            # Create snapshot from working tree
+            snapshot = snapshot_creator.create_snapshot(
+                parent_sha=last_step_sha,
+                message=f"rewindo-{next_entry_id}",
+                actor="assistant",
+                changed_files=changes
+            )
+
+            if not snapshot:
+                print("Error: Failed to create snapshot", file=sys.stderr)
+                prompt_state_file.unlink(missing_ok=True)
+                return 0
+
+        # Create journal entry for assistant step
+        entry_id = rewindo.append_entry(
+            actor="assistant",
+            checkpoint_sha=snapshot.sha,
+            files=snapshot.files,
+            prompt=prompt,
+            session=session,
+            parent_sha=last_step_sha,
+            diff_path=f"diffs/{next_entry_id:05d}.patch"
+        )
+
+        # Store ref
+        snapshot_creator.store_ref(entry_id, snapshot.sha)
+
+        # Update state
+        state_manager.update_last_step(snapshot.sha, entry_id)
+
+        # Clean up prompt state
+        prompt_state_file.unlink(missing_ok=True)
+
+        print(f"[rewindo] Assistant step #{entry_id} created: {len(snapshot.files)} file(s) changed", file=sys.stderr)
+
+        return 0
+
+    except Exception as e:
+        print(f"Error in capture-stop: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        # Clean up prompt state on error
+        try:
+            if (rewindo.data_dir / "prompt_state.json").exists():
+                (rewindo.data_dir / "prompt_state.json").unlink()
+        except:
+            pass
+        return 2  # Blocking error
+
+
+if __name__ == "__main__":
+    sys.exit(main())

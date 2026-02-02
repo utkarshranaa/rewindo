@@ -1,0 +1,27 @@
+{
+  "description": "Rewindo timeline hooks - captures prompts and creates checkpoints",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/log_prompt.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/log_stop.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

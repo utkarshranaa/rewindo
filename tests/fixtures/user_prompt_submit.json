@@ -1,0 +1,8 @@
+{
+  "session_id": "test-session-123",
+  "transcript_path": "/tmp/test/.claude/projects/test.jsonl",
+  "cwd": "/tmp/test-repo",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Create a simple hello world function in Python"
+}
