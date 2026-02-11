@@ -19,7 +19,7 @@ setup(
     long_description_content_type="text/markdown",
     author="Rewindo Contributors",
     license="MIT",
-    url="https://github.com/user/rewindo",
+    url="https://github.com/utkarshranaa/rewindo",
     package_dir={"": "lib"},
     packages=["rewindo"],
     entry_points={

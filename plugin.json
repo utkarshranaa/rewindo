@@ -4,7 +4,7 @@
   "description": "Prompt-to-code timeline with one-command revert for Claude Code",
   "author": "Rewindo Contributors",
   "license": "MIT",
-  "repository": "https://github.com/user/rewindo",
+  "repository": "https://github.com/utkarshranaa/rewindo",
   "hooks": "./hooks/hooks.json",
   "bin": {
     "rewindo": "./bin/rewindo"

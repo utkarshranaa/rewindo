@@ -27,7 +27,7 @@ Rewindo automatically records every prompt you give to Claude Code and the chang
 
 ```bash
 # Clone to your local plugins directory
-git clone https://github.com/user/rewindo.git ~/.claude/plugins/rewindo
+git clone https://github.com/utkarshranaa/rewindo.git ~/.claude/plugins/rewindo
 
 # Enable in your project
 cd /path/to/your-project
@@ -36,7 +36,7 @@ claude plugin enable ~/.claude/plugins/rewindo
 
 Or globally:
 ```bash
-git clone https://github.com/user/rewindo.git ~/.claude/plugins/rewindo
+git clone https://github.com/utkarshranaa/rewindo.git ~/.claude/plugins/rewindo
 ```
 
 Then enable per project as needed.
