@@ -245,7 +245,7 @@ class SnapshotCreator:
 
             return SnapshotResult(
                 sha=commit_sha,
-                ref=f"refs/rewindo/steps/{commit_sha[:8]}",
+                ref=f"refs/rewindo/checkpoints/{commit_sha[:8]}",
                 files=files_info,
                 message=message
             )
@@ -256,7 +256,7 @@ class SnapshotCreator:
 
     def store_ref(self, step_id: int, sha: str) -> bool:
         """
-        Store a step reference under refs/rewindo/steps/.
+        Store a step reference under refs/rewindo/checkpoints/.
 
         Args:
             step_id: Step ID number
@@ -265,7 +265,7 @@ class SnapshotCreator:
         Returns:
             True if successful, False otherwise
         """
-        ref_path = f"refs/rewindo/steps/{step_id}"
+        ref_path = f"refs/rewindo/checkpoints/{step_id}"
         result = self._run_git("update-ref", ref_path, sha)
         return result.returncode == 0
 
@@ -279,7 +279,7 @@ class SnapshotCreator:
         Returns:
             Commit SHA or None if not found
         """
-        ref_path = f"refs/rewindo/steps/{step_id}"
+        ref_path = f"refs/rewindo/checkpoints/{step_id}"
         result = self._run_git("rev-parse", ref_path)
         if result.returncode != 0:
             return None
@@ -295,7 +295,7 @@ class SnapshotCreator:
         Returns:
             True if successful, False otherwise
         """
-        ref_path = f"refs/rewindo/steps/{step_id}"
+        ref_path = f"refs/rewindo/checkpoints/{step_id}"
         result = self._run_git("update-ref", "-d", ref_path)
         return result.returncode == 0
 
@@ -307,7 +307,7 @@ class SnapshotCreator:
             List of dicts with 'id' and 'sha' keys
         """
         result = self._run_git("for-each-ref",
-                              "refs/rewindo/steps/",
+                              "refs/rewindo/checkpoints/",
                               "--format=%(refname)%00%(objectname)")
 
         if result.returncode != 0:

@@ -144,7 +144,6 @@ def test_missing_git_refs():
 
         # Delete the git ref for checkpoint #1
         print("[2/4] Deleting git ref for checkpoint #1...")
-        run_git(test_repo, "update-ref", "-d", "refs/rewindo/steps/1")
         run_git(test_repo, "update-ref", "-d", "refs/rewindo/checkpoints/1")
 
         # Try to show the entry - should fallback or report missing ref
@@ -230,7 +229,7 @@ def test_partial_timeline_data():
 
         # Delete one ref to simulate partial data loss
         print("[2/4] Simulating partial data loss...")
-        run_git(test_repo, "update-ref", "-d", "refs/rewindo/steps/2")
+        run_git(test_repo, "update-ref", "-d", "refs/rewindo/checkpoints/2")
 
         # Test list - should show both entries (timeline is separate from refs)
         print("[3/4] TEST: List with partial data...")
@@ -283,7 +282,7 @@ def test_doctor_diagnosis():
 
         # Test doctor with issue (delete a ref)
         print("[3/3] TEST: Doctor detects issues...")
-        run_git(test_repo, "update-ref", "-d", "refs/rewindo/steps/1")
+        run_git(test_repo, "update-ref", "-d", "refs/rewindo/checkpoints/1")
 
         rc, stdout, stderr = run_cli(test_repo, "doctor")
         # Should either detect issue or report something
