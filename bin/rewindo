@@ -243,10 +243,17 @@ def cmd_revert(rewindo, args):
         print(f"Entry #{args.id} not found", file=sys.stderr)
         return 1
 
+    # Check for dirty working tree before showing confirmation
+    is_dirty = rewindo.has_dirty_working_tree()
+
     if not args.yes:
         # Show what will happen
         prompt_snippet = entry.get("prompt", entry.get("message", ""))[:60]
         print(f"Will restore to step #{args.id}: \"{prompt_snippet}...\"")
+
+        if is_dirty:
+            print("\nWARNING: You have uncommitted changes that will be lost!")
+            print("Consider running 'git stash' first to save them.\n")
 
         # Check for user steps after target
         if args.replay == "user":
@@ -275,8 +282,8 @@ def cmd_revert(rewindo, args):
             print("Aborted")
             return 1
 
-    # Restore to target step
-    rewindo.revert_to(args.id)
+    # Restore to target step (force=True since user confirmed or --yes was used)
+    rewindo.revert_to(args.id, force=True)
     print(f"Restored to step #{args.id}")
 
     # Replay user edits if requested
@@ -356,16 +363,23 @@ def cmd_undo(rewindo, args):
         return 1
 
     last_id = entries[0]["id"]
+    is_dirty = rewindo.has_dirty_working_tree()
+
     if not args.yes:
         entry = entries[0]
         prompt_snippet = entry.get("prompt", "")[:60]
         print(f"Undoing checkpoint #{last_id}: \"{prompt_snippet}...\"")
+
+        if is_dirty:
+            print("\nWARNING: You have uncommitted changes that will be lost!")
+            print("Consider running 'git stash' first to save them.\n")
+
         confirm = input("This will reset your working tree. Continue? [y/N] ")
         if confirm.lower() != "y":
             print("Aborted")
             return 1
 
-    rewindo.undo()
+    rewindo.undo(force=True)
     print(f"Undid checkpoint #{last_id}")
     return 0
 

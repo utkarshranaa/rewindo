@@ -12,6 +12,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -48,10 +50,57 @@ class Rewindo:
         if not self._is_git_repo():
             raise ValueError(f"Not a git repository: {self.root}")
 
+        # Ensure .claude/data/ is in .gitignore so git reset doesn't wipe timeline
+        self._ensure_gitignored(data_dir)
+
     def _is_git_repo(self) -> bool:
         """Check if current directory is a git repository."""
         git_dir = self.root / ".git"
         return git_dir.exists() and git_dir.is_dir()
+
+    def _ensure_gitignored(self, data_dir: str) -> None:
+        """Ensure the data directory is in .gitignore."""
+        gitignore = self.root / ".gitignore"
+        entry = f"{data_dir}/"
+
+        if gitignore.exists():
+            content = gitignore.read_text()
+            if entry in content or f"/{entry}" in content:
+                return
+            gitignore.write_text(content.rstrip("\n") + f"\n{entry}\n")
+        else:
+            gitignore.write_text(f"# Rewindo timeline data\n{entry}\n")
+
+    @contextmanager
+    def _lock_timeline(self, timeout: float = 10.0):
+        """Acquire an exclusive lock on the timeline file."""
+        lock_path = self.data_dir / "timeline.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + timeout
+
+        while True:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                break
+            except FileExistsError:
+                if time.monotonic() > deadline:
+                    # Stale lock - force remove and retry once
+                    try:
+                        lock_path.unlink()
+                    except OSError:
+                        pass
+                    raise TimeoutError("Could not acquire timeline lock")
+                time.sleep(0.05)
+
+        try:
+            yield
+        finally:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
 
     def _run_git(self, *args, capture_output: bool = True, cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
         """Run a git command."""
@@ -256,46 +305,47 @@ class Rewindo:
         Returns:
             Entry ID of the created entry
         """
-        entry_id = self.get_next_entry_id()
-        timestamp = datetime.now().isoformat()
+        with self._lock_timeline():
+            entry_id = self.get_next_entry_id()
+            timestamp = datetime.now().isoformat()
 
-        # Build the entry
-        entry = {
-            "id": entry_id,
-            "ts": timestamp,
-            "actor": actor,
-            "checkpoint_sha": checkpoint_sha,
-            "checkpoint_ref": f"refs/rewindo/checkpoints/{entry_id}",
-            "files": files,
-            "labels": [],
-            "notes": ""
-        }
+            # Build the entry
+            entry = {
+                "id": entry_id,
+                "ts": timestamp,
+                "actor": actor,
+                "checkpoint_sha": checkpoint_sha,
+                "checkpoint_ref": f"refs/rewindo/checkpoints/{entry_id}",
+                "files": files,
+                "labels": [],
+                "notes": ""
+            }
 
-        # Add optional fields
-        if parent_sha is not None:
-            entry["parent_sha"] = parent_sha
+            # Add optional fields
+            if parent_sha is not None:
+                entry["parent_sha"] = parent_sha
 
-        if session:
-            entry["session"] = session
+            if session:
+                entry["session"] = session
 
-        if prompt:
-            entry["prompt"] = prompt[:500]  # Truncate in timeline
-            entry["prompt_ref"] = f"prompts/{entry_id:05d}.txt"
+            if prompt:
+                entry["prompt"] = prompt[:500]  # Truncate in timeline
+                entry["prompt_ref"] = f"prompts/{entry_id:05d}.txt"
 
-        if message:
-            entry["message"] = message
+            if message:
+                entry["message"] = message
 
-        if diff_path:
-            entry["diff_path"] = diff_path
+            if diff_path:
+                entry["diff_path"] = diff_path
 
-        # Append to timeline
-        timeline_path = self._get_timeline_path()
-        timeline_path.parent.mkdir(parents=True, exist_ok=True)
+            # Append to timeline
+            timeline_path = self._get_timeline_path()
+            timeline_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(timeline_path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+            with open(timeline_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
 
-        return entry_id
+            return entry_id
 
     def get_diff(
         self,
@@ -355,16 +405,42 @@ class Rewindo:
 
         return result
 
-    def revert_to(self, entry_id: int) -> bool:
+    def has_dirty_working_tree(self) -> bool:
+        """Check if working tree has uncommitted changes."""
+        # Unstaged changes
+        result = self._run_git("diff", "--quiet")
+        if result.returncode != 0:
+            return True
+        # Staged changes
+        result = self._run_git("diff", "--cached", "--quiet")
+        if result.returncode != 0:
+            return True
+        # Untracked files (excluding .claude/data/)
+        result = self._run_git("ls-files", "--others", "--exclude-standard")
+        untracked = [f for f in result.stdout.strip().split("\n")
+                     if f and not f.startswith(".claude/")]
+        return len(untracked) > 0
+
+    def revert_to(self, entry_id: int, force: bool = False) -> bool:
         """
         Revert working tree to checkpoint.
 
         Args:
             entry_id: Entry ID to revert to
+            force: If True, skip dirty tree check
 
         Returns:
             True if successful
+
+        Raises:
+            RuntimeError: If working tree is dirty and force is False
         """
+        if not force and self.has_dirty_working_tree():
+            raise RuntimeError(
+                "Working tree has uncommitted changes. "
+                "Commit or stash them first, or use --yes to force."
+            )
+
         # Try to get checkpoint_sha from journal entry first
         entry = self.get_entry(entry_id)
         if not entry:
@@ -372,15 +448,11 @@ class Rewindo:
 
         checkpoint_sha = entry.get("checkpoint_sha")
         if not checkpoint_sha:
-            # Fallback to old ref-based approach for backward compatibility
+            # Fallback to ref-based approach for backward compatibility
             ref_name = self._get_ref_name(entry_id)
             result = self._run_git("rev-parse", ref_name)
             if result.returncode != 0:
-                # Try new ref location
-                ref_name = f"refs/rewindo/steps/{entry_id}"
-                result = self._run_git("rev-parse", ref_name)
-                if result.returncode != 0:
-                    raise ValueError(f"Checkpoint #{entry_id} not found")
+                raise ValueError(f"Checkpoint #{entry_id} not found")
             checkpoint_sha = result.stdout.strip()
 
         # Reset working tree
@@ -414,30 +486,38 @@ class Rewindo:
 
         return True
 
-    def undo(self) -> bool:
+    def undo(self, force: bool = False) -> bool:
         """
         Undo the last checkpoint by reverting to its parent commit.
 
         This reverts to the state immediately BEFORE the last checkpoint.
 
+        Args:
+            force: If True, skip dirty tree check
+
         Returns:
             True if successful
+
+        Raises:
+            RuntimeError: If working tree is dirty and force is False
         """
+        if not force and self.has_dirty_working_tree():
+            raise RuntimeError(
+                "Working tree has uncommitted changes. "
+                "Commit or stash them first, or use --yes to force."
+            )
+
         entries = self.list_entries(limit=1)
         if not entries:
             raise ValueError("No checkpoints to undo")
 
         last_id = entries[0]["id"]
 
-        # Try to get the checkpoint ref (try steps location first, then checkpoints for backward compatibility)
-        ref_name = f"refs/rewindo/steps/{last_id}"
+        # Get the checkpoint ref
+        ref_name = self._get_ref_name(last_id)
         result = self._run_git("rev-parse", ref_name)
         if result.returncode != 0:
-            # Fallback to old checkpoints location
-            ref_name = self._get_ref_name(last_id)
-            result = self._run_git("rev-parse", ref_name)
-            if result.returncode != 0:
-                raise ValueError(f"Checkpoint #{last_id} not found")
+            raise ValueError(f"Checkpoint #{last_id} not found")
 
         # Get the parent commit (first parent, ^1)
         parent_result = self._run_git("rev-parse", f"{ref_name}^1")
@@ -483,32 +563,33 @@ class Rewindo:
         if not entry:
             return False
 
-        # Read all entries
-        timeline_path = self._get_timeline_path()
-        if not timeline_path.exists():
-            return False
+        with self._lock_timeline():
+            # Read all entries
+            timeline_path = self._get_timeline_path()
+            if not timeline_path.exists():
+                return False
 
-        entries = []
-        with open(timeline_path, "r") as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                    if e.get("id") == entry_id:
-                        # Add label if not already present
-                        labels = e.get("labels", [])
-                        if label not in labels:
-                            labels.append(label)
-                        e["labels"] = labels
-                    entries.append(e)
-                except (json.JSONDecodeError, KeyError):
-                    entries.append(json.loads(line))
+            entries = []
+            with open(timeline_path, "r") as f:
+                for line in f:
+                    try:
+                        e = json.loads(line)
+                        if e.get("id") == entry_id:
+                            # Add label if not already present
+                            labels = e.get("labels", [])
+                            if label not in labels:
+                                labels.append(label)
+                            e["labels"] = labels
+                        entries.append(e)
+                    except (json.JSONDecodeError, KeyError):
+                        entries.append(json.loads(line))
 
-        # Rewrite timeline
-        with open(timeline_path, "w") as f:
-            for entry in entries:
-                f.write(json.dumps(entry) + "\n")
+            # Rewrite timeline
+            with open(timeline_path, "w") as f:
+                for entry in entries:
+                    f.write(json.dumps(entry) + "\n")
 
-        return True
+            return True
 
     def search(self, query: str) -> List[Dict[str, Any]]:
         """
@@ -547,7 +628,7 @@ class Rewindo:
         try:
             result = self._run_git("show-ref", capture_output=True)
             if result.returncode == 0:
-                has_checkpoint_refs = self.REFS_PREFIX.replace("/checkpoints", "") in result.stdout
+                has_checkpoint_refs = self.REFS_PREFIX in result.stdout
         except Exception:
             pass
 
@@ -734,8 +815,17 @@ class Rewindo:
         if entry.get("labels"):
             print(f"Labels:     {', '.join(entry['labels'])}")
 
+        # Show full prompt (from file if available, otherwise from entry)
+        entry_id = entry["id"]
+        full_prompt = None
+        prompt_path = self._get_prompt_path(entry_id)
+        if prompt_path.exists():
+            full_prompt = prompt_path.read_text()
+        if not full_prompt:
+            full_prompt = entry.get("prompt", entry.get("message", ""))
+
         print(f"\nPrompt:")
-        print(f"  {entry.get('prompt', '')[:200]}")
+        print(f"  {full_prompt}")
 
         if entry.get("files"):
             print(f"\nFiles changed:")
@@ -747,3 +837,11 @@ class Rewindo:
 
         print(f"\nRef:        {entry.get('checkpoint_ref', 'unknown')}")
         print(f"SHA:        {entry.get('checkpoint_sha', 'unknown')}")
+
+        # Show diff (from file if available)
+        diff_path = self._get_diff_path(entry_id)
+        if diff_path.exists():
+            diff_text = diff_path.read_text()
+            if diff_text:
+                print(f"\nDiff:")
+                print(diff_text)
