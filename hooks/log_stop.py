@@ -30,9 +30,43 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any
+
+
+@contextmanager
+def lock_timeline(data_dir: Path, timeout: float = 10.0):
+    """Acquire an exclusive lock on the timeline file."""
+    lock_path = data_dir / "timeline.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+                raise TimeoutError("Could not acquire timeline lock")
+            time.sleep(0.05)
+
+    try:
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
 
 
 def run_git(cwd: Path, *args, capture_output: bool = True) -> subprocess.CompletedProcess:
@@ -101,42 +135,90 @@ def create_git_checkpoint(cwd: Path, entry_id: int) -> Optional[str]:
     """
     Create a git checkpoint using refs (not branch commits).
 
+    Uses a temporary GIT_INDEX_FILE to avoid modifying the user's real index.
+
     Process:
-    1. git add -A (stage all changes)
-    2. git write-tree (capture tree state)
-    3. git commit-tree (create detached commit)
-    4. git update-ref refs/rewindo/checkpoints/<id> (store ref)
-    5. git reset --hard HEAD (return to previous state)
+    1. Create temporary index file
+    2. git read-tree HEAD (populate temp index from HEAD)
+    3. git add -A (stage all changes in temp index)
+    4. git write-tree (capture tree state from temp index)
+    5. git commit-tree (create detached commit)
+    6. git update-ref refs/rewindo/checkpoints/<id> (store ref)
+    7. Clean up temp index file
 
     Returns:
         Commit SHA if successful, None otherwise
     """
-    try:
-        # 1. Stage all changes
-        run_git(cwd, "add", "-A", capture_output=False)
+    temp_index_fd = None
+    temp_index_path = None
 
-        # 2. Capture tree state
-        tree_result = run_git(cwd, "write-tree")
+    try:
+        # 1. Create temporary index file
+        temp_index_fd, temp_index_path = tempfile.mkstemp(suffix=".index")
+        os.close(temp_index_fd)
+        temp_index_fd = None
+
+        # Set GIT_INDEX_FILE to use our temp index
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = temp_index_path
+
+        # 2. Initialize the temp index from HEAD (if exists)
+        read_tree_result = subprocess.run(
+            ["git", "read-tree", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            env=env
+        )
+        if read_tree_result.returncode != 0:
+            # HEAD might not exist (empty repo), that's ok
+            pass
+
+        # 3. Stage all changes to temp index
+        add_result = subprocess.run(
+            ["git", "add", "-A"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            env=env
+        )
+        if add_result.returncode != 0:
+            return None
+
+        # 4. Capture tree state from temp index
+        tree_result = subprocess.run(
+            ["git", "write-tree"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            env=env
+        )
         if tree_result.returncode != 0:
             return None
         tree_sha = tree_result.stdout.strip()
 
-        # 3. Get current HEAD (parent commit)
+        # 5. Get current HEAD (parent commit)
         head_result = run_git(cwd, "rev-parse", "HEAD")
         parent_sha = head_result.stdout.strip() if head_result.returncode == 0 else None
 
-        # 4. Create detached commit
+        # 6. Create detached commit
         commit_message = f"rewindo-{entry_id}"
-        commit_args = ["commit-tree", tree_sha, "-m", commit_message]
+        commit_args = ["git", "commit-tree", tree_sha, "-m", commit_message]
         if parent_sha:
             commit_args.extend(["-p", parent_sha])
 
-        commit_result = run_git(cwd, *commit_args)
+        commit_result = subprocess.run(
+            commit_args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            env=env
+        )
         if commit_result.returncode != 0:
             return None
         commit_sha = commit_result.stdout.strip()
 
-        # 5. Store in refs namespace
+        # 7. Store in refs namespace
         ref_name = f"refs/rewindo/checkpoints/{entry_id}"
         update_result = run_git(cwd, "update-ref", ref_name, commit_sha)
         if update_result.returncode != 0:
@@ -147,6 +229,20 @@ def create_git_checkpoint(cwd: Path, entry_id: int) -> Optional[str]:
     except Exception as e:
         print(f"Error creating checkpoint: {e}", file=sys.stderr)
         return None
+
+    finally:
+        # Clean up temp index file
+        if temp_index_fd is not None:
+            try:
+                os.close(temp_index_fd)
+            except (IOError, OSError):
+                pass
+
+        if temp_index_path and os.path.exists(temp_index_path):
+            try:
+                os.unlink(temp_index_path)
+            except (IOError, OSError):
+                pass
 
 
 def save_full_diff(cwd: Path, diff_path: Path) -> bool:
@@ -252,49 +348,51 @@ def main():
         sys.exit(0)
 
     # We have changes - create checkpoint
-    timeline_path = data_dir / "timeline.jsonl"
-    entry_id = get_next_entry_id(timeline_path)
+    # Lock timeline during ID allocation + write to prevent concurrent corruption
+    with lock_timeline(data_dir):
+        timeline_path = data_dir / "timeline.jsonl"
+        entry_id = get_next_entry_id(timeline_path)
 
-    # Parse file changes from git stat
-    files_changed = parse_git_stat(diff_stat_result.stdout)
+        # Parse file changes from git stat
+        files_changed = parse_git_stat(diff_stat_result.stdout)
 
-    # Create git checkpoint
-    commit_sha = create_git_checkpoint(project_root, entry_id)
-    if not commit_sha:
-        print("Error: Failed to create git checkpoint", file=sys.stderr)
-        state_file.unlink(missing_ok=True)
-        sys.exit(0)
+        # Create git checkpoint
+        commit_sha = create_git_checkpoint(project_root, entry_id)
+        if not commit_sha:
+            print("Error: Failed to create git checkpoint", file=sys.stderr)
+            state_file.unlink(missing_ok=True)
+            sys.exit(0)
 
-    # Save full diff
-    diff_path = data_dir / "diffs" / f"{entry_id:05d}.patch"
-    save_full_diff(project_root, diff_path)
+        # Save full diff
+        diff_path = data_dir / "diffs" / f"{entry_id:05d}.patch"
+        save_full_diff(project_root, diff_path)
 
-    # Save full prompt
-    prompt_path = data_dir / "prompts" / f"{entry_id:05d}.txt"
-    save_full_prompt(prompt_path, prompt)
+        # Save full prompt
+        prompt_path = data_dir / "prompts" / f"{entry_id:05d}.txt"
+        save_full_prompt(prompt_path, prompt)
 
-    # Create timeline entry
-    entry = {
-        "id": entry_id,
-        "ts": timestamp,
-        "session": session_id,
-        "prompt": prompt[:500],  # Truncate in timeline (full in file)
-        "prompt_ref": f"prompts/{entry_id:05d}.txt",
-        "checkpoint_ref": f"refs/rewindo/checkpoints/{entry_id}",
-        "checkpoint_sha": commit_sha,
-        "files": files_changed,
-        "diff_path": f"diffs/{entry_id:05d}.patch",
-        "labels": [],
-        "notes": ""
-    }
+        # Create timeline entry
+        entry = {
+            "id": entry_id,
+            "ts": timestamp,
+            "session": session_id,
+            "prompt": prompt[:500],  # Truncate in timeline (full in file)
+            "prompt_ref": f"prompts/{entry_id:05d}.txt",
+            "checkpoint_ref": f"refs/rewindo/checkpoints/{entry_id}",
+            "checkpoint_sha": commit_sha,
+            "files": files_changed,
+            "diff_path": f"diffs/{entry_id:05d}.patch",
+            "labels": [],
+            "notes": ""
+        }
 
-    # Append to timeline
-    try:
-        timeline_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(timeline_path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as e:
-        print(f"Error writing timeline: {e}", file=sys.stderr)
+        # Append to timeline
+        try:
+            timeline_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(timeline_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            print(f"Error writing timeline: {e}", file=sys.stderr)
 
     # Clean up state file
     state_file.unlink(missing_ok=True)
