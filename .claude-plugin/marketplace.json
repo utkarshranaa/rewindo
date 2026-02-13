@@ -1,0 +1,25 @@
+{
+  "name": "rewindo-marketplace",
+  "owner": {
+    "name": "Rewindo Contributors"
+  },
+  "metadata": {
+    "description": "Prompt-to-code timeline with one-command revert for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "rewindo",
+      "source": "./",
+      "description": "Prompt-to-code timeline with one-command revert for Claude Code",
+      "version": "0.1.0",
+      "author": {
+        "name": "Rewindo Contributors"
+      },
+      "homepage": "https://github.com/utkarshranaa/rewindo",
+      "repository": "https://github.com/utkarshranaa/rewindo",
+      "license": "MIT",
+      "keywords": ["timeline", "revert", "checkpoints", "git", "undo"],
+      "category": "productivity"
+    }
+  ]
+}
