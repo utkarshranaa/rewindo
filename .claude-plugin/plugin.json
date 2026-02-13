@@ -1,0 +1,8 @@
+{
+  "name": "rewindo",
+  "version": "0.1.0",
+  "description": "Prompt-to-code timeline with one-command revert for Claude Code",
+  "author": {
+    "name": "Rewindo Contributors"
+  }
+}
