@@ -36,15 +36,15 @@ except ImportError:
 
 # Import new modules for manual edits tracking
 try:
-    from state import StateManager
-    from detector import WorkingTreeDetector
-    from snapshot import SnapshotCreator
+    from rewindo.state import StateManager
+    from rewindo.detector import WorkingTreeDetector
+    from rewindo.snapshot import SnapshotCreator
 except ImportError:
     # For development, fallback to relative import
     sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
-    from state import StateManager
-    from detector import WorkingTreeDetector
-    from snapshot import SnapshotCreator
+    from rewindo.state import StateManager
+    from rewindo.detector import WorkingTreeDetector
+    from rewindo.snapshot import SnapshotCreator
 
 
 def main():
@@ -332,7 +332,7 @@ def replay_user_steps(rewindo, user_steps):
         True if all steps replayed successfully, False if conflict occurred
     """
     import os
-    from detector import WorkingTreeDetector
+    from rewindo.detector import WorkingTreeDetector
 
     detector = WorkingTreeDetector(rewindo.root)
 

@@ -10,8 +10,8 @@ from pathlib import Path
 LIB_DIR = Path(__file__).parent.parent / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
-from snapshot import SnapshotCreator
-from detector import FileChange
+from rewindo.snapshot import SnapshotCreator
+from rewindo.detector import FileChange
 
 
 def run_git(cwd: Path, *args):

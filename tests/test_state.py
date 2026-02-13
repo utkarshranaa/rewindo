@@ -10,7 +10,7 @@ import sys
 LIB_DIR = Path(__file__).parent.parent / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
-from state import StateManager
+from rewindo.state import StateManager
 
 
 def test_state_manager_creates_file():

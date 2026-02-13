@@ -10,7 +10,7 @@ from pathlib import Path
 LIB_DIR = Path(__file__).parent.parent / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
-from detector import WorkingTreeDetector, FileChange
+from rewindo.detector import WorkingTreeDetector, FileChange
 
 
 def run_git(cwd: Path, *args):

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Setup configuration for installing the Rewindo package
 """Setup configuration for Rewindo."""
 
 from pathlib import Path
@@ -9,7 +10,7 @@ here = Path(__file__).parent
 
 # Read README for long description
 readme = here / "README.md"
-long_description = readme.read_text() if readme.exists() else ""
+long_description = readme.read_text(encoding="utf-8") if readme.exists() else ""
 
 setup(
     name="rewindo",

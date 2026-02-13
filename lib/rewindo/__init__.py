@@ -20,12 +20,13 @@ def main():
         return _cli_main()
     except ImportError:
         # Fallback: run the bin/rewindo script directly
-        package_root = Path(__file__).parent.parent
-        bin_script = package_root / "bin" / "rewindo"
+        # __file__ is lib/rewindo/__init__.py, so repo root is 2 levels up
+        repo_root = Path(__file__).parent.parent.parent
+        bin_script = repo_root / "bin" / "rewindo"
 
         # Read and exec the script
         import runpy
-        sys.path.insert(0, str(package_root / "lib"))
+        sys.path.insert(0, str(repo_root / "lib"))
         return runpy.run_path(str(bin_script), run_name="__main__")
 
 
@@ -34,15 +35,14 @@ def _cli_main():
     import sys
     from pathlib import Path
 
-    # Find and run the bin/rewindo script
-    current_file = Path(__file__)
-    package_root = current_file.parent.parent
-    bin_script = package_root / "bin" / "rewindo"
+    # __file__ is lib/rewindo/__init__.py, so repo root is 2 levels up
+    repo_root = Path(__file__).parent.parent.parent
+    bin_script = repo_root / "bin" / "rewindo"
 
     if not bin_script.exists():
         raise FileNotFoundError(f"CLI script not found at {bin_script}")
 
     # Execute the CLI script
     import runpy
-    sys.path.insert(0, str(package_root / "lib"))
+    sys.path.insert(0, str(repo_root / "lib"))
     runpy.run_path(str(bin_script), run_name="__main__")

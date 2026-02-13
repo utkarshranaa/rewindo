@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
-from detector import WorkingTreeDetector, FileChange
+from .detector import WorkingTreeDetector, FileChange
 
 
 @dataclass
