@@ -97,6 +97,23 @@ def get_next_entry_id(timeline_path: Path) -> int:
     return max_id + 1
 
 
+def get_last_checkpoint_sha(timeline_path: Path) -> Optional[str]:
+    """Get the checkpoint SHA from the most recent timeline entry."""
+    if not timeline_path.exists():
+        return None
+    last_sha = None
+    with open(timeline_path, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                sha = entry.get("checkpoint_sha")
+                if sha:
+                    last_sha = sha
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return last_sha
+
+
 def parse_git_stat(stat_output: str) -> List[Dict[str, Any]]:
     """
     Parse git diff --stat output into file change list.
@@ -245,13 +262,13 @@ def create_git_checkpoint(cwd: Path, entry_id: int) -> Optional[str]:
                 pass
 
 
-def save_full_diff(cwd: Path, diff_path: Path) -> bool:
+def save_full_diff(cwd: Path, diff_path: Path, diff_base: str = "HEAD") -> bool:
     """Save full git diff to file."""
     try:
-        result = run_git(cwd, "diff", "HEAD")
+        result = run_git(cwd, "diff", diff_base)
         if result.returncode != 0:
-            # Try diff without HEAD (for empty repo)
-            result = run_git(cwd, "diff", "--cached")
+            # Try diff against HEAD as fallback
+            result = run_git(cwd, "diff", "HEAD")
 
         if result.returncode == 0 and result.stdout:
             diff_path.parent.mkdir(parents=True, exist_ok=True)
@@ -328,19 +345,17 @@ def main():
     session_id = state.get("session_id", "")
     timestamp = state.get("timestamp", datetime.now().isoformat())
 
-    # Check for git changes
-    diff_stat_result = run_git(project_root, "diff", "--stat", "HEAD")
+    # Determine comparison base: previous checkpoint or HEAD
+    timeline_path = data_dir / "timeline.jsonl"
+    prev_sha = get_last_checkpoint_sha(timeline_path)
+    diff_base = prev_sha if prev_sha else "HEAD"
+
+    # Check for changes relative to the comparison base
+    diff_stat_result = run_git(project_root, "diff", "--stat", diff_base)
 
     has_changes = False
     if diff_stat_result.returncode == 0 and diff_stat_result.stdout.strip():
         has_changes = True
-
-    # Check for staged changes too
-    if not has_changes:
-        staged_result = run_git(project_root, "diff", "--cached", "--stat")
-        if staged_result.returncode == 0 and staged_result.stdout.strip():
-            has_changes = True
-            diff_stat_result = staged_result
 
     if not has_changes:
         # No changes, just clean up state file
@@ -365,7 +380,7 @@ def main():
 
         # Save full diff
         diff_path = data_dir / "diffs" / f"{entry_id:05d}.patch"
-        save_full_diff(project_root, diff_path)
+        save_full_diff(project_root, diff_path, diff_base)
 
         # Save full prompt
         prompt_path = data_dir / "prompts" / f"{entry_id:05d}.txt"
