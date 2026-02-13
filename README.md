@@ -81,18 +81,16 @@ This helps you track exactly what changed, whether it was from a prompt or your 
 
 ## Quick Start
 
-Once enabled, Rewindo works automatically:
+Once the plugin is installed, Rewindo works automatically. Every prompt you submit and every response Claude gives is recorded.
+
+You can run `rewindo` commands either from your terminal (if you did `pip install -e .`) or by asking Claude inside a session (e.g., "show me my timeline").
 
 ```bash
-# Start working with Claude Code
-claude
-
-# Make some changes...
 # Prompt: "Add user authentication"
 # Prompt: "Add database layer"
 # Prompt: "Add API endpoints"
 
-# Later, view your timeline
+# View your timeline
 rewindo list
 
 # Output:
@@ -113,39 +111,6 @@ rewindo undo
 ```
 
 ## Commands
-
-### `rewindo init`
-
-Set up Claude Code hooks automatically.
-
-```bash
-rewindo init              # Interactive setup
-rewindo init --global     # Use global timeline storage
-rewindo init --dry-run    # Preview changes without making them
-```
-
-This configures your `~/.claude/settings.json` to add the required hooks.
-
-### `rewindo status`
-
-Check if Rewindo hooks are configured.
-
-```bash
-rewindo status
-```
-
-Output:
-```
-Rewindo Status
-============================================================
-Settings location: C:\Users\You\.claude\settings.json
-
-Hook Configuration:
-  [OK] prompt-submit: rewindo capture-prompt
-  [OK] stop: rewindo capture-stop
-
-[OK] Rewindo is properly configured!
-```
 
 ### `rewindo list [--limit N] [--query PATTERN] [--expand] [--expand-chars N]`
 
@@ -315,8 +280,8 @@ Claude makes code changes
          ↓
 Stop hook fires
          ↓
-1. git diff detects changes
-2. git add -A (stage changes)
+1. Compare working tree against previous checkpoint (skip if unchanged)
+2. Create temporary index file (does not touch your real git index)
 3. git write-tree (capture tree state)
 4. git commit-tree (create detached commit)
 5. git update-ref refs/rewindo/checkpoints/<id> (store ref)
@@ -364,9 +329,9 @@ The `.claude/data/` directory is automatically added to `.gitignore`.
 # Claude made a mistake on the last prompt
 rewindo undo
 
-# Or undo a specific prompt
-rewindo list        # Find the prompt ID
-rewindo revert 12    # Revert to before that prompt
+# Or revert to a specific checkpoint
+rewindo list        # Find the checkpoint ID
+rewindo revert 12   # Restore your code to the state at checkpoint #12
 ```
 
 ### Workflow 2: Mark and Restore Working States
@@ -412,21 +377,20 @@ rewindo export 17
 
 ## Troubleshooting
 
-### Commands not found
+### Plugin not loading
 
-Make sure the plugin is enabled:
-```bash
-claude plugin enable /path/to/rewindo
+Verify the plugin is installed by typing `/hooks` inside Claude Code. You should see the rewindo UserPromptSubmit and Stop hooks. If not, reinstall:
+
+```
+/plugin marketplace add utkarshranaa/rewindo
+/plugin install rewindo@rewindo-marketplace
 ```
 
 ### Timeline not recording
 
-Check hooks are installed:
-```bash
-claude /hooks    # In Claude Code
-```
-
-Look for `rewindo` in the hooks list.
+1. Type `/hooks` inside Claude Code to confirm hooks are active
+2. Make sure you're in a git repository (`git status` should succeed)
+3. Run `rewindo doctor` to check timeline health
 
 ### "No checkpoints found"
 
@@ -437,9 +401,8 @@ rewindo doctor
 
 ### Revert doesn't work
 
-Ensure you're in a git repository and have no uncommitted changes you want to keep:
+Rewindo warns you if you have uncommitted changes before reverting. If you want to save them first:
 ```bash
-git status
 git stash    # Save uncommitted work
 rewindo revert 5
 ```
@@ -449,15 +412,10 @@ rewindo revert 5
 ### Running Tests
 
 ```bash
-# End-to-end hooks test
-python tests/test_hooks.py
-
-# CLI commands test
-python tests/test_cli_phase2.py
-
-# Unit tests (when written)
-pytest tests/
+python -m pytest tests/ -v
 ```
+
+All 112 tests cover hooks, CLI commands, snapshots, conflict resolution, cross-platform compatibility, and performance.
 
 ### Project Structure
 
@@ -493,11 +451,9 @@ Rewindo is designed to minimize token usage when used with LLMs:
 - Search filters reduce context
 - Revert doesn't read diffs (uses SHAs directly)
 
-See PRD Section 14 for full token efficiency requirements.
-
 ## Contributing
 
-Contributions welcome! Please read the PRD (`PRD.md`) for design context.
+Contributions welcome! See `PRD.md` for design context and architecture decisions.
 
 ## License
 
