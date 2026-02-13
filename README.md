@@ -25,38 +25,32 @@ Rewindo automatically records every prompt you give to Claude Code and the chang
 
 ### Install the Plugin
 
-```bash
-# Clone to your local plugins directory
-git clone https://github.com/utkarshranaa/rewindo.git ~/.claude/plugins/rewindo
+Inside any Claude Code session, run these two commands:
 
-# Enable in your project
-cd /path/to/your-project
-claude plugin enable ~/.claude/plugins/rewindo
+```
+/plugin marketplace add utkarshranaa/rewindo
+/plugin install rewindo@rewindo-marketplace
 ```
 
-Or globally:
-```bash
-git clone https://github.com/utkarshranaa/rewindo.git ~/.claude/plugins/rewindo
-```
+That's it. The hooks activate automatically — every prompt is captured and every response creates a checkpoint.
 
-Then enable per project as needed.
+### Install the CLI (optional)
 
-### Set Up Hooks
+The plugin handles recording automatically, but to use commands like `rewindo list` and `rewindo revert` from your terminal:
 
 ```bash
-# Run the init command to configure Claude Code hooks
-rewindo init
+git clone https://github.com/utkarshranaa/rewindo.git
+cd rewindo
+pip install -e .
 ```
 
-This will automatically add the necessary hooks to your Claude Code settings:
-- `prompt-submit` hook saves your prompt before sending to Claude
-- `stop` hook creates a checkpoint after Claude finishes responding
+This puts the `rewindo` command on your PATH.
 
-To check if hooks are configured:
+### Verify Installation
 
-```bash
-rewindo status
-```
+Inside Claude Code, type `/hooks` to confirm the rewindo hooks are active. You should see:
+- **UserPromptSubmit** hook (captures prompts)
+- **Stop** hook (creates checkpoints)
 
 ### Understanding the Timeline
 
@@ -469,19 +463,23 @@ pytest tests/
 
 ```
 rewindo/
-├── plugin.json           # Plugin metadata
+├── .claude-plugin/
+│   ├── plugin.json        # Plugin manifest
+│   └── marketplace.json   # Marketplace catalog
 ├── hooks/
-│   ├── hooks.json        # Hook definitions
-│   ├── log_prompt.py     # UserPromptSubmit hook
-│   └── log_stop.py       # Stop hook
+│   ├── hooks.json         # Hook definitions
+│   ├── log_prompt.py      # UserPromptSubmit hook
+│   └── log_stop.py        # Stop hook
 ├── bin/
-│   └── rewindo       # CLI tool
-├── lib/
-│   ├── __init__.py
-│   └── rewindo.py        # Core library
-├── tests/
-│   ├── test_hooks.py
-│   └── test_cli_phase2.py
+│   └── rewindo            # CLI tool
+├── lib/rewindo/
+│   ├── __init__.py        # Package init + entry point
+│   ├── rewindo.py         # Core library (timeline, revert, undo)
+│   ├── detector.py        # Working tree change detection
+│   ├── snapshot.py        # Git snapshot creation
+│   └── state.py           # State file management
+├── tests/                 # 112 tests
+├── setup.py               # pip install support
 └── README.md
 ```
 
