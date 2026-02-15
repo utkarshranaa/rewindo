@@ -292,128 +292,114 @@ def save_full_prompt(prompt_path: Path, prompt: str) -> None:
 
 
 def main():
-    # Read hook input from stdin
     try:
+        # Read hook input from stdin
         input_data = json.load(sys.stdin)
-    except json.JSONDecodeError as e:
-        print(f"Error: Invalid JSON input: {e}", file=sys.stderr)
-        sys.exit(0)  # Non-blocking error
 
-    # Validate event type
-    event_name = input_data.get("hook_event_name")
-    if event_name != "Stop":
-        sys.exit(0)
+        # Validate event type
+        event_name = input_data.get("hook_event_name")
+        if event_name != "Stop":
+            sys.exit(0)
 
-    # Extract fields
-    cwd = input_data.get("cwd", "")
-    if not cwd:
-        sys.exit(0)
+        # Extract fields
+        cwd = input_data.get("cwd", "")
+        if not cwd:
+            sys.exit(0)
 
-    project_root = Path(cwd)
-    data_dir = project_root / ".claude" / "data"
+        project_root = Path(cwd)
+        data_dir = project_root / ".claude" / "data"
 
-    # Ensure .claude/data/ is in .gitignore to prevent tracking timeline files
-    gitignore = project_root / ".gitignore"
-    gitignore_entries = []
-    if gitignore.exists():
-        gitignore_entries = gitignore.read_text().splitlines()
+        # Ensure .claude/data/ is in .gitignore to prevent tracking timeline files
+        gitignore = project_root / ".gitignore"
+        gitignore_entries = []
+        if gitignore.exists():
+            gitignore_entries = gitignore.read_text().splitlines()
 
-    # Add .claude/data/ to gitignore if not present
-    if ".claude/data/" not in gitignore_entries and "/.claude/data/" not in gitignore_entries:
+        if ".claude/data/" not in gitignore_entries and "/.claude/data/" not in gitignore_entries:
+            try:
+                with open(gitignore, "a") as f:
+                    f.write("\n# Rewindo timeline data\n.claude/data/\n")
+            except Exception:
+                pass
+
+        # Read prompt state (written by UserPromptSubmit hook)
+        state_file = data_dir / "prompt_state.json"
+        if not state_file.exists():
+            sys.exit(0)
+
         try:
-            with open(gitignore, "a") as f:
-                f.write("\n# Rewindo timeline data\n.claude/data/\n")
-            run_git(project_root, "add", ".gitignore")
-        except Exception:
-            pass  # Non-fatal if we can't update gitignore
-
-    # Read prompt state (written by UserPromptSubmit hook)
-    state_file = data_dir / "prompt_state.json"
-    if not state_file.exists():
-        # No prompt was submitted, nothing to do
-        sys.exit(0)
-
-    try:
-        with open(state_file, "r") as f:
-            state = json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"Error reading prompt state: {e}", file=sys.stderr)
-        state_file.unlink(missing_ok=True)
-        sys.exit(0)
-
-    prompt = state.get("prompt", "")
-    session_id = state.get("session_id", "")
-    timestamp = state.get("timestamp", datetime.now().isoformat())
-
-    # Determine comparison base: previous checkpoint or HEAD
-    timeline_path = data_dir / "timeline.jsonl"
-    prev_sha = get_last_checkpoint_sha(timeline_path)
-    diff_base = prev_sha if prev_sha else "HEAD"
-
-    # Check for changes relative to the comparison base
-    diff_stat_result = run_git(project_root, "diff", "--stat", diff_base)
-
-    has_changes = False
-    if diff_stat_result.returncode == 0 and diff_stat_result.stdout.strip():
-        has_changes = True
-
-    if not has_changes:
-        # No changes, just clean up state file
-        state_file.unlink(missing_ok=True)
-        sys.exit(0)
-
-    # We have changes - create checkpoint
-    # Lock timeline during ID allocation + write to prevent concurrent corruption
-    with lock_timeline(data_dir):
-        timeline_path = data_dir / "timeline.jsonl"
-        entry_id = get_next_entry_id(timeline_path)
-
-        # Parse file changes from git stat
-        files_changed = parse_git_stat(diff_stat_result.stdout)
-
-        # Create git checkpoint
-        commit_sha = create_git_checkpoint(project_root, entry_id)
-        if not commit_sha:
-            print("Error: Failed to create git checkpoint", file=sys.stderr)
+            with open(state_file, "r") as f:
+                state = json.load(f)
+        except (json.JSONDecodeError, IOError):
             state_file.unlink(missing_ok=True)
             sys.exit(0)
 
-        # Save full diff
-        diff_path = data_dir / "diffs" / f"{entry_id:05d}.patch"
-        save_full_diff(project_root, diff_path, diff_base)
+        prompt = state.get("prompt", "")
+        session_id = state.get("session_id", "")
+        timestamp = state.get("timestamp", datetime.now().isoformat())
 
-        # Save full prompt
-        prompt_path = data_dir / "prompts" / f"{entry_id:05d}.txt"
-        save_full_prompt(prompt_path, prompt)
+        # Determine comparison base: previous checkpoint or HEAD
+        timeline_path = data_dir / "timeline.jsonl"
+        prev_sha = get_last_checkpoint_sha(timeline_path)
+        diff_base = prev_sha if prev_sha else "HEAD"
 
-        # Create timeline entry
-        entry = {
-            "id": entry_id,
-            "ts": timestamp,
-            "session": session_id,
-            "prompt": prompt[:500],  # Truncate in timeline (full in file)
-            "prompt_ref": f"prompts/{entry_id:05d}.txt",
-            "checkpoint_ref": f"refs/rewindo/checkpoints/{entry_id}",
-            "checkpoint_sha": commit_sha,
-            "files": files_changed,
-            "diff_path": f"diffs/{entry_id:05d}.patch",
-            "labels": [],
-            "notes": ""
-        }
+        # Check for changes relative to the comparison base
+        diff_stat_result = run_git(project_root, "diff", "--stat", diff_base)
 
-        # Append to timeline
-        try:
-            timeline_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(timeline_path, "a") as f:
-                f.write(json.dumps(entry) + "\n")
-        except Exception as e:
-            print(f"Error writing timeline: {e}", file=sys.stderr)
+        has_changes = (diff_stat_result.returncode == 0 and diff_stat_result.stdout.strip())
 
-    # Clean up state file
-    state_file.unlink(missing_ok=True)
+        if not has_changes:
+            state_file.unlink(missing_ok=True)
+            sys.exit(0)
 
-    # Success - optionally output to stderr for visibility in verbose mode
-    print(f"[rewindo] Checkpoint #{entry_id} created: {len(files_changed)} file(s) changed", file=sys.stderr)
+        # We have changes - create checkpoint
+        with lock_timeline(data_dir):
+            timeline_path = data_dir / "timeline.jsonl"
+            entry_id = get_next_entry_id(timeline_path)
+
+            files_changed = parse_git_stat(diff_stat_result.stdout)
+
+            commit_sha = create_git_checkpoint(project_root, entry_id)
+            if not commit_sha:
+                state_file.unlink(missing_ok=True)
+                sys.exit(0)
+
+            # Save full diff
+            diff_path = data_dir / "diffs" / f"{entry_id:05d}.patch"
+            save_full_diff(project_root, diff_path, diff_base)
+
+            # Save full prompt
+            prompt_path = data_dir / "prompts" / f"{entry_id:05d}.txt"
+            save_full_prompt(prompt_path, prompt)
+
+            # Create timeline entry
+            entry = {
+                "id": entry_id,
+                "ts": timestamp,
+                "session": session_id,
+                "prompt": prompt[:500],
+                "prompt_ref": f"prompts/{entry_id:05d}.txt",
+                "checkpoint_ref": f"refs/rewindo/checkpoints/{entry_id}",
+                "checkpoint_sha": commit_sha,
+                "files": files_changed,
+                "diff_path": f"diffs/{entry_id:05d}.patch",
+                "labels": [],
+                "notes": ""
+            }
+
+            try:
+                timeline_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(timeline_path, "a") as f:
+                    f.write(json.dumps(entry) + "\n")
+            except Exception:
+                pass
+
+        # Clean up state file
+        state_file.unlink(missing_ok=True)
+
+    except Exception:
+        # Silently exit — never write to stderr as Claude Code shows it as a hook error
+        pass
 
     sys.exit(0)
 

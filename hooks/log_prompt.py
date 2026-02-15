@@ -26,62 +26,47 @@ from pathlib import Path
 
 
 def main():
-    # Read hook input from stdin
     try:
+        # Read hook input from stdin
         input_data = json.load(sys.stdin)
-    except json.JSONDecodeError as e:
-        print(f"Error: Invalid JSON input: {e}", file=sys.stderr)
-        sys.exit(0)  # Non-blocking error
 
-    # Validate event type
-    event_name = input_data.get("hook_event_name")
-    if event_name != "UserPromptSubmit":
-        print(f"Warning: Expected UserPromptSubmit, got {event_name}", file=sys.stderr)
-        sys.exit(0)
+        # Validate event type
+        event_name = input_data.get("hook_event_name")
+        if event_name != "UserPromptSubmit":
+            sys.exit(0)
 
-    # Extract required fields
-    prompt = input_data.get("prompt", "")
-    session_id = input_data.get("session_id", "")
-    cwd = input_data.get("cwd", "")
+        # Extract required fields
+        prompt = input_data.get("prompt", "")
+        session_id = input_data.get("session_id", "")
+        cwd = input_data.get("cwd", "")
 
-    if not cwd:
-        print("Error: No cwd in hook input", file=sys.stderr)
-        sys.exit(0)
+        if not cwd or not prompt:
+            sys.exit(0)
 
-    if not prompt:
-        # Empty prompt - nothing to capture
-        sys.exit(0)
+        # Determine project root
+        project_root = Path(cwd)
 
-    # Determine project root
-    project_root = Path(cwd)
-
-    # Create data directory
-    data_dir = project_root / ".claude" / "data"
-    try:
+        # Create data directory
+        data_dir = project_root / ".claude" / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        print(f"Error creating data directory: {e}", file=sys.stderr)
-        sys.exit(0)
 
-    # Write prompt state for Stop hook to read
-    state_file = data_dir / "prompt_state.json"
+        # Write prompt state for Stop hook to read
+        state_file = data_dir / "prompt_state.json"
 
-    state = {
-        "prompt": prompt,
-        "session_id": session_id,
-        "timestamp": datetime.now().isoformat(),
-        "cwd": str(project_root)
-    }
+        state = {
+            "prompt": prompt,
+            "session_id": session_id,
+            "timestamp": datetime.now().isoformat(),
+            "cwd": str(project_root)
+        }
 
-    try:
         with open(state_file, "w") as f:
             json.dump(state, f)
-    except Exception as e:
-        print(f"Error writing prompt state: {e}", file=sys.stderr)
-        sys.exit(0)
 
-    # Success - prompt is captured
-    # No stdout output (would be added to context)
+    except Exception:
+        # Silently exit — never write to stderr as Claude Code shows it as a hook error
+        pass
+
     sys.exit(0)
 
 
