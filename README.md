@@ -392,6 +392,13 @@ Verify the plugin is installed by typing `/hooks` inside Claude Code. You should
 2. Make sure you're in a git repository (`git status` should succeed)
 3. Run `rewindo doctor` to check timeline health
 
+### Hooks not running on Windows
+
+If you see hook errors on Windows, edit `hooks/hooks.json` and change `python3` to `python`:
+```json
+"command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/log_prompt.py\""
+```
+
 ### "No checkpoints found"
 
 Run doctor to diagnose:
