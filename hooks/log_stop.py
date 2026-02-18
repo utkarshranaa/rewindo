@@ -72,12 +72,17 @@ def lock_timeline(data_dir: Path, timeout: float = 10.0):
 def run_git(cwd: Path, *args, capture_output: bool = True) -> subprocess.CompletedProcess:
     """Run a git command in the specified directory."""
     cmd = ["git"] + list(args)
-    return subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=capture_output,
-        text=True
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=capture_output,
+            text=True,
+            timeout=25
+        )
+    except subprocess.TimeoutExpired:
+        # Return a failed result so callers treat it as a git error
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="timeout")
 
 
 def get_next_entry_id(timeline_path: Path) -> int:
@@ -185,7 +190,8 @@ def create_git_checkpoint(cwd: Path, entry_id: int) -> Optional[str]:
             cwd=cwd,
             capture_output=True,
             text=True,
-            env=env
+            env=env,
+            timeout=25
         )
         if read_tree_result.returncode != 0:
             # HEAD might not exist (empty repo), that's ok
@@ -197,7 +203,8 @@ def create_git_checkpoint(cwd: Path, entry_id: int) -> Optional[str]:
             cwd=cwd,
             capture_output=True,
             text=True,
-            env=env
+            env=env,
+            timeout=25
         )
         if add_result.returncode != 0:
             return None
@@ -208,7 +215,8 @@ def create_git_checkpoint(cwd: Path, entry_id: int) -> Optional[str]:
             cwd=cwd,
             capture_output=True,
             text=True,
-            env=env
+            env=env,
+            timeout=25
         )
         if tree_result.returncode != 0:
             return None
@@ -229,7 +237,8 @@ def create_git_checkpoint(cwd: Path, entry_id: int) -> Optional[str]:
             cwd=cwd,
             capture_output=True,
             text=True,
-            env=env
+            env=env,
+            timeout=25
         )
         if commit_result.returncode != 0:
             return None
@@ -243,8 +252,7 @@ def create_git_checkpoint(cwd: Path, entry_id: int) -> Optional[str]:
 
         return commit_sha
 
-    except Exception as e:
-        print(f"Error creating checkpoint: {e}", file=sys.stderr)
+    except Exception:
         return None
 
     finally:
