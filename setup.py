@@ -32,6 +32,11 @@ setup(
     install_requires=[
         # No external dependencies - uses only stdlib
     ],
+    extras_require={
+        "dev": [
+            "pytest>=7.0",
+        ],
+    },
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
