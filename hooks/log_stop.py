@@ -390,8 +390,8 @@ def save_full_prompt(prompt_path: Path, prompt: str) -> None:
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         with open(prompt_path, "w") as f:
             f.write(prompt)
-    except Exception as e:
-        print(f"Error saving prompt: {e}", file=sys.stderr)
+    except Exception:
+        pass
 
 
 def main():
@@ -412,29 +412,27 @@ def main():
         project_root = Path(cwd)
         data_dir = project_root / ".claude" / "data"
 
-        # Ensure rewindo-managed paths are in .gitignore
-        gitignore = project_root / ".gitignore"
-        gitignore_entries = []
-        if gitignore.exists():
-            gitignore_entries = gitignore.read_text().splitlines()
-
-        needs_update = []
-        if ".claude/data/" not in gitignore_entries and "/.claude/data/" not in gitignore_entries:
-            needs_update.append(".claude/data/")
-        if (
-            ".claude/settings.local.json" not in gitignore_entries
-            and "/.claude/settings.local.json" not in gitignore_entries
-        ):
-            needs_update.append(".claude/settings.local.json")
-
-        if needs_update:
-            try:
-                with open(gitignore, "a") as f:
-                    f.write("\n# Rewindo — auto-ignored paths\n")
+        # Ensure rewindo-managed paths are excluded from git status output.
+        # We write to .git/info/exclude (not .gitignore) so we never modify a
+        # tracked file — which would itself show up as a diff and trigger spurious
+        # checkpoints. .git/info/exclude works identically for the local clone.
+        data_dir.mkdir(parents=True, exist_ok=True)
+        exclude_file = project_root / ".git" / "info" / "exclude"
+        try:
+            exclude_file.parent.mkdir(parents=True, exist_ok=True)
+            existing = exclude_file.read_text() if exclude_file.exists() else ""
+            needs_update = []
+            if ".claude/data/" not in existing:
+                needs_update.append(".claude/data/")
+            if ".claude/settings.local.json" not in existing:
+                needs_update.append(".claude/settings.local.json")
+            if needs_update:
+                with open(exclude_file, "a") as f:
+                    f.write("\n# Rewindo — auto-excluded paths\n")
                     for entry in needs_update:
                         f.write(f"{entry}\n")
-            except Exception:
-                pass
+        except Exception:
+            pass
 
         # Read prompt state (written by UserPromptSubmit hook)
         state_file = data_dir / "prompt_state.json"
@@ -467,6 +465,7 @@ def main():
         # We filter them out and handle them separately below.
         diff_stat_result = run_git(project_root, "diff", "--stat", diff_base)
         all_stat_files = parse_git_stat(diff_stat_result.stdout) if diff_stat_result.returncode == 0 else []
+        # Exclude untracked files (false deletions from prev checkpoint tree).
         real_tracked_changes = [f for f in all_stat_files if f["path"] not in untracked_set]
 
         if prev_sha:

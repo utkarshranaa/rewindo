@@ -8,6 +8,7 @@ Verifies:
 - Tracked file modified → checkpoint created, files_changed shows only that file
 - New untracked non-gitignored file → checkpoint created, file appears in files_changed
 - Per-prompt delta: consecutive prompts create separate checkpoints with correct file lists
+- Stop hook never writes to stderr (Claude Code shows hook stderr as a visible error)
 """
 
 import json
@@ -402,3 +403,139 @@ class TestPerPromptDelta:
         assert add2 < add1, \
             f"Checkpoint #2 delta ({add2} additions) should be less than checkpoint #1 delta " \
             f"({add1} additions) since only 1 line was added in prompt 2"
+
+
+# ---------------------------------------------------------------------------
+# Test: stop hook never writes to stderr
+# ---------------------------------------------------------------------------
+
+class TestNoStderr:
+
+    def test_no_stderr_on_normal_run(self, tmp_path):
+        """Stop hook must produce no stderr output during a normal run."""
+        init_repo(tmp_path)
+
+        run_prompt_hook(tmp_path, "write some code")
+        (tmp_path / "main.py").write_text("print('hello')\n")
+        result = run_stop_hook(tmp_path)
+
+        assert result.stderr == "", \
+            f"Stop hook wrote to stderr on normal run: {result.stderr!r}"
+
+    def test_no_stderr_on_no_changes(self, tmp_path):
+        """Stop hook must produce no stderr when there are no file changes."""
+        init_repo(tmp_path)
+
+        run_prompt_hook(tmp_path, "what is 2+2?")
+        result = run_stop_hook(tmp_path)
+
+        assert result.stderr == "", \
+            f"Stop hook wrote to stderr when no changes: {result.stderr!r}"
+
+    def test_no_stderr_when_prompt_save_fails(self, tmp_path):
+        """Stop hook must not write to stderr even if the prompts directory is unwritable.
+
+        This specifically tests the save_full_prompt error path — previously it had
+        a print(..., file=sys.stderr) that would surface as a visible hook error.
+        """
+        import stat
+        init_repo(tmp_path)
+
+        # Create a read-only prompts directory so save_full_prompt raises
+        prompts_dir = tmp_path / ".claude" / "data" / "prompts"
+        prompts_dir.mkdir(parents=True)
+        prompts_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)  # r-x, no write
+
+        run_prompt_hook(tmp_path, "write code")
+        (tmp_path / "app.py").write_text("x = 1\n")
+        result = run_stop_hook(tmp_path)
+
+        # Restore permissions so tmp_path cleanup can delete it
+        prompts_dir.chmod(stat.S_IRWXU)
+
+        assert result.stderr == "", \
+            f"Stop hook wrote to stderr when prompt save failed: {result.stderr!r}"
+
+
+# ---------------------------------------------------------------------------
+# Test: .git/info/exclude management (no tracked .gitignore modification)
+# ---------------------------------------------------------------------------
+
+def init_repo_bare(path: Path) -> None:
+    """Initialize a repo with NO rewindo gitignore entries — simulates a fresh project.
+
+    The stop hook must handle this without modifying any tracked file.
+    """
+    subprocess.run(["git", "init"], cwd=path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, capture_output=True)
+    (path / "README.md").write_text("# Test\n")
+    (path / ".gitignore").write_text("*.pyc\n__pycache__/\n")
+    subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=path, capture_output=True)
+
+
+class TestGitInfoExclude:
+
+    def test_fresh_project_pure_chat_no_checkpoint(self, tmp_path):
+        """In a project with no rewindo gitignore entries, pure chat must NOT
+        create a checkpoint. The stop hook uses .git/info/exclude (not .gitignore)
+        to avoid spurious tracked-file modifications.
+        """
+        init_repo_bare(tmp_path)
+
+        run_prompt_hook(tmp_path, "what is 2+2?")
+        # No code changes
+        run_stop_hook(tmp_path)
+
+        assert timeline_entries(tmp_path) == [], \
+            "Pure-chat on a fresh project must not create a checkpoint"
+
+    def test_gitignore_not_modified_by_stop_hook(self, tmp_path):
+        """The stop hook must never modify .gitignore — only .git/info/exclude."""
+        import hashlib
+        init_repo_bare(tmp_path)
+
+        original_content = (tmp_path / ".gitignore").read_text()
+        original_hash = hashlib.md5(original_content.encode()).hexdigest()
+
+        run_prompt_hook(tmp_path, "what is 2+2?")
+        run_stop_hook(tmp_path)
+
+        current_content = (tmp_path / ".gitignore").read_text()
+        current_hash = hashlib.md5(current_content.encode()).hexdigest()
+
+        assert current_hash == original_hash, \
+            "Stop hook must not modify .gitignore (use .git/info/exclude instead)"
+
+    def test_git_info_exclude_written(self, tmp_path):
+        """After the stop hook runs, .git/info/exclude should contain the rewindo paths."""
+        init_repo_bare(tmp_path)
+
+        run_prompt_hook(tmp_path, "hello")
+        run_stop_hook(tmp_path)
+
+        exclude_file = tmp_path / ".git" / "info" / "exclude"
+        assert exclude_file.exists(), ".git/info/exclude should be created"
+        content = exclude_file.read_text()
+        assert ".claude/data/" in content, ".claude/data/ should be in .git/info/exclude"
+        assert ".claude/settings.local.json" in content, \
+            ".claude/settings.local.json should be in .git/info/exclude"
+
+    def test_claude_data_files_not_seen_as_untracked_after_exclude(self, tmp_path):
+        """After the stop hook writes .git/info/exclude, .claude/data/ files
+        should not be visible as untracked — so they never trigger false checkpoints.
+        """
+        init_repo_bare(tmp_path)
+
+        # Run stop hook once so it writes .git/info/exclude
+        run_prompt_hook(tmp_path, "setup run")
+        run_stop_hook(tmp_path)
+
+        # Now simulate the next prompt — .claude/data/ files exist but should be excluded
+        run_prompt_hook(tmp_path, "what is 3+3?")
+        run_stop_hook(tmp_path)
+
+        # Still no checkpoint — .claude/data/ files are ignored
+        assert timeline_entries(tmp_path) == [], \
+            ".claude/data/ files must not trigger a checkpoint after .git/info/exclude is written"
