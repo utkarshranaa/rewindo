@@ -3,7 +3,7 @@
 from .rewindo import Rewindo
 
 __all__ = ["Rewindo", "main"]
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 
 def main():
